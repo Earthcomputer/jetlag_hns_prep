@@ -51,6 +51,14 @@ Usage:
         --step-km 10 --secondary-step-km 2 --secondary-threshold-km 10 \
         --max-distance-km 50
 
+    # Delete layers from a KML or KMZ file
+    python hide_and_seek_enhancer.py delete-layers input.kml output.kml \
+        --layers Layer1,Layer2
+
+    # Copy features from one layer to another existing layer
+    python hide_and_seek_enhancer.py copy-layer input.kml output.kml \
+        --from-layer SourceLayer --to-layer TargetLayer
+
 Dependencies:
     pip install geopandas scipy shapely pyproj fiona lxml
 """
@@ -207,7 +215,7 @@ def choose_projected_crs(gdf: gpd.GeoDataFrame) -> CRS:
     except Exception:
         pass
 
-    centroid = gdf.geometry.unary_union.centroid
+    centroid = gdf.geometry.union_all().centroid
     return CRS.from_proj4(
         f"+proj=aeqd +lat_0={centroid.y} +lon_0={centroid.x} "
         f"+datum=WGS84 +units=m +no_defs"
@@ -646,6 +654,35 @@ def main():
         help="Comma-separated list of layer names to exclude from hiding, e.g. 'Layer1,Layer2'",
     )
 
+    # Delete layers command
+    delete_parser = subparsers.add_parser(
+        "delete-layers", help="Delete specified layers from the KML/KMZ file"
+    )
+    delete_parser.add_argument("input_kml", help="Input KML or KMZ file")
+    delete_parser.add_argument("output_kml", help="Output KML or KMZ with layers deleted")
+    delete_parser.add_argument(
+        "--layers",
+        required=True,
+        help="Comma-separated list of layer names to delete, e.g. 'Layer1,Layer2'",
+    )
+
+    # Copy layer command
+    copy_parser = subparsers.add_parser(
+        "copy-layer", help="Copy features from one layer to another existing layer"
+    )
+    copy_parser.add_argument("input_kml", help="Input KML or KMZ file")
+    copy_parser.add_argument("output_kml", help="Output KML or KMZ with copied features")
+    copy_parser.add_argument(
+        "--from-layer",
+        required=True,
+        help="Name of the layer to copy features from",
+    )
+    copy_parser.add_argument(
+        "--to-layer",
+        required=True,
+        help="Name of the existing layer to copy features to",
+    )
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -658,6 +695,10 @@ def main():
         generate_contour_command(args)
     elif args.command == "hide-layers":
         hide_layers_command(args)
+    elif args.command == "delete-layers":
+        delete_layers_command(args)
+    elif args.command == "copy-layer":
+        copy_layer_command(args)
     else:
         parser.print_help()
 
@@ -1050,7 +1091,13 @@ def process_contour_layer(
 
     projected_crs = choose_projected_crs(gdf)
     target_proj = gdf.to_crs(projected_crs)
-    union_geom = target_proj.unary_union
+    
+    # Convert polygons to boundaries to treat them as hollow
+    target_proj['geometry'] = target_proj.geometry.apply(
+        lambda g: g.boundary if g.geom_type in ['Polygon', 'MultiPolygon'] else g
+    )
+    
+    union_geom = target_proj.union_all()
 
     clip_box_wgs84 = None
     if None not in (min_lon, min_lat, max_lon, max_lat):
@@ -1121,6 +1168,7 @@ def generate_contour_command(args):
     # Process each layer
     print("\nProcessing layers:")
     contour_results = []
+    contours_by_layer = {layer_name: [] for layer_name in sorted(layers.keys())}
     for layer_name in sorted(layers.keys()):
         gdf = layers[layer_name]
         num_features = len(gdf)
@@ -1140,11 +1188,16 @@ def generate_contour_command(args):
         )
         if layer_contours:
             contour_results.extend(layer_contours)
+            contours_by_layer[layer_name].extend(
+                [(distance_km, geom) for _, distance_km, geom in layer_contours]
+            )
+        else:
+            print(f"  No contour lines were generated for layer '{layer_name}' within the requested bbox.")
 
     if not contour_results:
         raise ValueError("No contour lines were generated for any layer.")
 
-    print(f"\nGenerated {len(contour_results)} contour layer(s) across {len(layers)} layer(s).")
+    print(f"\nGenerated {len(contour_results)} contour line(s) across {len(layers)} layer(s).")
 
     print("\nWriting contour output KML...")
     from lxml import etree as ET
@@ -1170,13 +1223,9 @@ def generate_contour_command(args):
     if doc_desc_elem is not None and doc_desc_elem.text:
         ET.SubElement(document, "description").text = doc_desc_elem.text
 
-    # Group contours by layer
-    contours_by_layer = {}
+    # Group contours by layer, keeping processed layers even if they produced no lines
     all_distances = set()
     for layer_name, distance_km, geom in contour_results:
-        if layer_name not in contours_by_layer:
-            contours_by_layer[layer_name] = []
-        contours_by_layer[layer_name].append((distance_km, geom))
         all_distances.add(distance_km)
 
     sorted_distances = sorted(all_distances)
@@ -1259,7 +1308,7 @@ def generate_contour_command(args):
     kml_output_content = output_buffer.getvalue().decode('utf-8')
     write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
 
-    print(f"\nWrote contour output with {len(contour_results)} contour(s) across {len(contours_by_layer)} layer(s) to: {args.output_kml}")
+    print(f"\nWrote contour output with {len(contour_results)} contour(s) across {len(layers)} layer(s) to: {args.output_kml}")
     print(f"Preserved all existing layers from input KML.")
 
 
@@ -1304,6 +1353,112 @@ def hide_layers_command(args):
         # For excluded layers, keep original visibility (don't add or change)
 
     print(f"Set {hidden_count} layer(s) to hidden.")
+
+    # Write output
+    output_buffer = io.BytesIO()
+    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
+    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
+
+    print(f"Wrote output to: {args.output_kml}")
+
+
+def delete_layers_command(args):
+    """Delete specified layers from the KML/KMZ file."""
+    # Parse layers to delete
+    layers_to_delete = set()
+    if args.layers:
+        layers_to_delete = {x.strip() for x in args.layers.split(",")}
+
+    print(f"Reading KML from: {args.input_kml}")
+    print(f"Deleting layers: {', '.join(sorted(layers_to_delete))}")
+
+    # Read KML content (handles both .kml and .kmz)
+    kml_content = read_kml_from_file(args.input_kml)
+    from lxml import etree as ET
+    import io
+    tree = ET.parse(io.BytesIO(kml_content))
+    root = tree.getroot()
+
+    ns = {"kml": "http://www.opengis.net/kml/2.2"}
+    document = root.find(".//kml:Document", ns)
+    if document is None:
+        raise ValueError("No Document element found in KML.")
+
+    # Find and remove specified folders
+    deleted_count = 0
+    folders_to_remove = []
+    for folder in document.findall("kml:Folder", ns):
+        folder_name_elem = folder.find("kml:name", ns)
+        folder_name = (
+            folder_name_elem.text.strip() if folder_name_elem is not None and folder_name_elem.text else "Unnamed"
+        )
+        if folder_name in layers_to_delete:
+            folders_to_remove.append(folder)
+            deleted_count += 1
+
+    # Remove the folders
+    for folder in folders_to_remove:
+        document.remove(folder)
+
+    print(f"Deleted {deleted_count} layer(s).")
+
+    # Write output
+    output_buffer = io.BytesIO()
+    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
+    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
+
+    print(f"Wrote output to: {args.output_kml}")
+
+
+def copy_layer_command(args):
+    """Copy features from one layer to another existing layer."""
+    from_layer = args.from_layer
+    to_layer = args.to_layer
+
+    print(f"Reading KML from: {args.input_kml}")
+    print(f"Copying features from '{from_layer}' to '{to_layer}'")
+
+    # Read KML content (handles both .kml and .kmz)
+    kml_content = read_kml_from_file(args.input_kml)
+    from lxml import etree as ET
+    import io
+    tree = ET.parse(io.BytesIO(kml_content))
+    root = tree.getroot()
+
+    ns = {"kml": "http://www.opengis.net/kml/2.2"}
+    document = root.find(".//kml:Document", ns)
+    if document is None:
+        raise ValueError("No Document element found in KML.")
+
+    # Find source and target folders
+    source_folder = None
+    target_folder = None
+    for folder in document.findall("kml:Folder", ns):
+        folder_name_elem = folder.find("kml:name", ns)
+        folder_name = (
+            folder_name_elem.text.strip() if folder_name_elem is not None and folder_name_elem.text else "Unnamed"
+        )
+        if folder_name == from_layer:
+            source_folder = folder
+        elif folder_name == to_layer:
+            target_folder = folder
+
+    if source_folder is None:
+        raise ValueError(f"Source layer '{from_layer}' not found in KML/KMZ.")
+    if target_folder is None:
+        raise ValueError(f"Target layer '{to_layer}' not found in KML/KMZ.")
+
+    # Copy placemarks from source to target
+    copied_count = 0
+    for placemark in source_folder.findall("kml:Placemark", ns):
+        # Deep copy the placemark
+        copied_placemark = deepcopy(placemark)
+        target_folder.append(copied_placemark)
+        copied_count += 1
+
+    print(f"Copied {copied_count} feature(s) from '{from_layer}' to '{to_layer}'.")
 
     # Write output
     output_buffer = io.BytesIO()
