@@ -305,7 +305,7 @@ def extract_layers_from_kml(kml_path: str) -> dict[str, gpd.GeoDataFrame]:
     """
     import xml.etree.ElementTree as ET
     import io
-    from shapely.geometry import GeometryCollection, LineString, Point, Polygon
+    from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon
 
     ns = {"kml": "http://www.opengis.net/kml/2.2"}
 
@@ -353,6 +353,13 @@ def extract_layers_from_kml(kml_path: str) -> dict[str, gpd.GeoDataFrame]:
 
         if len(geometries) == 1:
             return geometries[0]
+
+        if all(isinstance(g, Point) for g in geometries):
+            return MultiPoint(geometries)
+        if all(isinstance(g, LineString) for g in geometries):
+            return MultiLineString(geometries)
+        if all(isinstance(g, Polygon) for g in geometries):
+            return MultiPolygon(geometries)
 
         return GeometryCollection(geometries)
 
@@ -1112,10 +1119,16 @@ def process_contour_layer(
     projected_crs = choose_projected_crs(gdf)
     target_proj = gdf.to_crs(projected_crs)
     
-    # Convert polygons to boundaries to treat them as hollow
-    target_proj['geometry'] = target_proj.geometry.apply(
-        lambda g: g.boundary if g.geom_type in ['Polygon', 'MultiPolygon'] else g
-    )
+    # Convert polygons and polygon-based collections to boundaries to treat them as hollow
+    def geometry_to_boundary(g):
+        if g.geom_type in ['Polygon', 'MultiPolygon']:
+            return g.boundary
+        if isinstance(g, GeometryCollection):
+            if any(part.geom_type in ['Polygon', 'MultiPolygon'] for part in g.geoms):
+                return g.boundary
+        return g
+
+    target_proj['geometry'] = target_proj.geometry.apply(geometry_to_boundary)
 
     clip_box_wgs84 = None
     if None not in (min_lon, min_lat, max_lon, max_lat):
