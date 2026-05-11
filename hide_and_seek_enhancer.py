@@ -717,21 +717,36 @@ def list_layers_command(input_kml: str):
     tree = ET.parse(io.BytesIO(kml_content))
     root = tree.getroot()
     
-    # Get point layers from existing function
-    point_layers = extract_layers_from_kml(input_kml)
+    # Get all extracted layers
+    all_layers = extract_layers_from_kml(input_kml)
     
-    # Find all folders and categorize them
-    all_folders = []
+    # Find all folders and categorize them by geometry type
+    point_layers = {}
+    non_point_layers = []
+    
     for folder in root.findall(".//kml:Folder", ns):
         folder_name_elem = folder.find("kml:name", ns)
         folder_name = (
             folder_name_elem.text.strip() if folder_name_elem is not None and folder_name_elem.text else "Unnamed"
         )
-        all_folders.append(folder_name)
-    
-    # Separate into point and non-point layers
-    point_layer_names = set(point_layers.keys())
-    non_point_layers = [name for name in all_folders if name not in point_layer_names]
+        
+        # Only process folders that have extracted layers
+        if folder_name in all_layers:
+            # Check if this layer is a point-only layer by examining Placemarks
+            is_point_layer = True
+            for placemark in folder.findall("kml:Placemark", ns):
+                # Check for non-Point geometries
+                if placemark.find(".//kml:LineString", ns) is not None:
+                    is_point_layer = False
+                    break
+                if placemark.find(".//kml:Polygon", ns) is not None:
+                    is_point_layer = False
+                    break
+            
+            if is_point_layer:
+                point_layers[folder_name] = all_layers[folder_name]
+            else:
+                non_point_layers.append(folder_name)
     
     # Display point layers
     if point_layers:
@@ -746,7 +761,12 @@ def list_layers_command(input_kml: str):
     if non_point_layers:
         print(f"\nNon-point layers ({len(non_point_layers)}):")
         for i, layer_name in enumerate(sorted(non_point_layers), 1):
-            print(f"  {i}. {layer_name}")
+            # Count features in the layer
+            if layer_name in all_layers:
+                num_features = len(all_layers[layer_name])
+                print(f"  {i}. {layer_name:<50} ({num_features} feature{'s' if num_features != 1 else ''})")
+            else:
+                print(f"  {i}. {layer_name}")
     else:
         print("\nNon-point layers: None")
 
