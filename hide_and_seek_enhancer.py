@@ -1116,17 +1116,33 @@ def process_contour_layer(
     target_proj['geometry'] = target_proj.geometry.apply(
         lambda g: g.boundary if g.geom_type in ['Polygon', 'MultiPolygon'] else g
     )
-    
-    union_geom = target_proj.union_all()
 
     clip_box_wgs84 = None
     if None not in (min_lon, min_lat, max_lon, max_lat):
         clip_box_wgs84 = box(min_lon, min_lat, max_lon, max_lat)
 
     layer_contours = []
+    
     for distance_m, distance_km in zip(distances_m, distances_km):
-        buffered = union_geom.buffer(distance_m)
-        contour_line = buffered.boundary
+        # Buffer each geometry individually and combine results
+        # This is much faster than union_all() on complex polygons
+        buffered_geoms = []
+        for geom in target_proj.geometry:
+            if not geom.is_empty:
+                buffered = geom.buffer(distance_m, resolution=8)
+                if not buffered.is_empty:
+                    buffered_geoms.append(buffered)
+        
+        if not buffered_geoms:
+            continue
+        
+        # Combine all buffered geometries for this distance
+        if len(buffered_geoms) == 1:
+            combined = buffered_geoms[0]
+        else:
+            combined = unary_union(buffered_geoms)
+        
+        contour_line = combined.boundary
         if contour_line.is_empty:
             continue
 
