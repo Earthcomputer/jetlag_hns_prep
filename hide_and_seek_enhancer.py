@@ -129,6 +129,36 @@ def parse_kml_coordinates(coords_text: str) -> list[tuple[float, float]]:
     return coords
 
 
+def format_xml_string(element_tree_element: 'ET.Element') -> str:
+    """
+    Convert a standard library ET.Element tree to a properly formatted XML string.
+    This ensures consistent pretty-printing across all subcommands.
+    """
+    import io
+    # First pass: get the string from ET
+    tree_str = ET.tostring(element_tree_element, encoding='utf-8')
+    
+    # Parse with lxml
+    lxml_tree = etree.fromstring(tree_str)
+    
+    # Use lxml's built-in pretty_print for output
+    output_buffer = io.BytesIO()
+    etree.ElementTree(lxml_tree).write(
+        output_buffer, 
+        encoding="utf-8", 
+        xml_declaration=True, 
+        pretty_print=True
+    )
+    
+    result = output_buffer.getvalue().decode('utf-8')
+    
+    # Clean up namespace prefixes added by lxml conversion (replace ns0:, ns1:, etc. with default namespace)
+    import re
+    result = re.sub(r'\bns\d+:', '', result)
+    
+    return result
+
+
 def extract_layer_geometries_from_kml(kml_path: str, layer_name: str) -> gpd.GeoDataFrame:
     """Extract geometries from a named Folder (layer) in KML/KMZ."""
     import io
@@ -884,12 +914,9 @@ def split_layer_command(input_kml: str, output_kml: str, layer_name: str):
                     split_folder.append(deepcopy(placemark))
                 folder_count += 1
 
-    tree = ET.ElementTree(kml_doc)
-    # Convert tree to string for our write helper
+    # Convert to lxml for pretty printing
     import io
-    output_buffer = io.BytesIO()
-    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
-    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    kml_output_content = format_xml_string(kml_doc)
     
     # Write output (handles both .kml and .kmz)
     write_kml_to_file(kml_output_content, output_kml, input_kml)
@@ -1024,12 +1051,9 @@ def generate_voronoi_command(args):
             coords_text = " ".join(f"{x},{y},0" for x, y in geom.coords)
             coords.text = coords_text
 
-    tree = ET.ElementTree(kml_doc)
-    # Convert tree to string for our write helper
+    # Convert to lxml for pretty printing
     import io
-    output_buffer = io.BytesIO()
-    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
-    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    kml_output_content = format_xml_string(kml_doc)
     
     # Write output (handles both .kml and .kmz)
     write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
@@ -1351,10 +1375,8 @@ def generate_contour_command(args):
                 coords = ET.SubElement(linestring, "coordinates")
                 coords.text = " ".join(f"{x},{y},0" for x, y in line.coords)
 
-    tree = ET.ElementTree(kml_doc)
-    output_buffer = io.BytesIO()
-    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
-    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    # Convert to lxml for pretty printing using helper function
+    kml_output_content = format_xml_string(kml_doc)
     write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
 
     print(f"\nWrote contour output with {len(contour_results)} contour(s) across {len(layers)} layer(s) to: {args.output_kml}")
@@ -1403,10 +1425,8 @@ def hide_layers_command(args):
 
     print(f"Set {hidden_count} layer(s) to hidden.")
 
-    # Write output
-    output_buffer = io.BytesIO()
-    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
-    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    # Write output with proper formatting
+    kml_output_content = format_xml_string(root)
     write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
 
     print(f"Wrote output to: {args.output_kml}")
@@ -1452,10 +1472,8 @@ def delete_layers_command(args):
 
     print(f"Deleted {deleted_count} layer(s).")
 
-    # Write output
-    output_buffer = io.BytesIO()
-    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
-    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    # Write output with proper formatting
+    kml_output_content = format_xml_string(root)
     write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
 
     print(f"Wrote output to: {args.output_kml}")
@@ -1509,10 +1527,8 @@ def copy_layer_command(args):
 
     print(f"Copied {copied_count} feature(s) from '{from_layer}' to '{to_layer}'.")
 
-    # Write output
-    output_buffer = io.BytesIO()
-    tree.write(output_buffer, encoding="utf-8", xml_declaration=True, pretty_print=True)
-    kml_output_content = output_buffer.getvalue().decode('utf-8')
+    # Write output with proper formatting
+    kml_output_content = format_xml_string(root)
     write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
 
     print(f"Wrote output to: {args.output_kml}")
