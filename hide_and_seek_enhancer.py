@@ -64,6 +64,7 @@ Dependencies:
 """
 
 import argparse
+import os
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
@@ -71,11 +72,12 @@ from copy import deepcopy
 
 import geopandas as gpd
 import numpy as np
+import requests
 from lxml import etree
 from pyproj import CRS
 from scipy.spatial import Voronoi
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, box
-from shapely.ops import unary_union
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, Point, box
+from shapely.ops import unary_union, nearest_points, transform as shapely_transform
 
 
 def read_kml_from_file(file_path: str) -> bytes:
@@ -720,6 +722,58 @@ def main():
         help="Name of the existing layer to copy features to",
     )
 
+    # Fetch places command
+    fetch_parser = subparsers.add_parser(
+        "fetch-places", help="Fetch locations of a specific type using Google Maps API and add to a new layer"
+    )
+    fetch_parser.add_argument("input_kml", help="Input KML or KMZ file")
+    fetch_parser.add_argument("output_kml", help="Output KML or KMZ with new places layer")
+    fetch_parser.add_argument(
+        "--type",
+        required=True,
+        help="Place type to search for (see https://developers.google.com/maps/documentation/places/web-service/place-types)",
+    )
+    fetch_parser.add_argument(
+        "--max-results",
+        type=int,
+        default=20,
+        help="Maximum number of results to fetch (default 20)",
+    )
+    fetch_parser.add_argument(
+        "--min-lon",
+        type=float,
+        required=True,
+        help="Minimum longitude of search area",
+    )
+    fetch_parser.add_argument(
+        "--min-lat",
+        type=float,
+        required=True,
+        help="Minimum latitude of search area",
+    )
+    fetch_parser.add_argument(
+        "--max-lon",
+        type=float,
+        required=True,
+        help="Maximum longitude of search area",
+    )
+    fetch_parser.add_argument(
+        "--max-lat",
+        type=float,
+        required=True,
+        help="Maximum latitude of search area",
+    )
+    fetch_parser.add_argument(
+        "--debug-json",
+        type=str,
+        help="Path to a debug JSON file containing place features to emulate Google Places responses",
+    )
+    fetch_parser.add_argument(
+        "--debug-plot-dir",
+        type=str,
+        help="Directory to write PNGs showing the searched area after each query iteration",
+    )
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -736,6 +790,8 @@ def main():
         delete_layers_command(args)
     elif args.command == "copy-layer":
         copy_layer_command(args)
+    elif args.command == "fetch-places":
+        fetch_places_command(args)
     else:
         parser.print_help()
 
@@ -1531,6 +1587,405 @@ def copy_layer_command(args):
     kml_output_content = format_xml_string(root)
     write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
 
+    print(f"Wrote output to: {args.output_kml}")
+
+
+def fetch_places_command(args):
+    """Fetch locations of a specific type using Google Maps API and add to a new layer."""
+    import json
+    from math import cos, radians, sin, atan2
+    from pyproj import CRS, Transformer
+    from shapely.geometry import Point, box
+    from shapely.ops import unary_union
+
+    debug_mode = args.debug_json is not None
+    debug_plot_dir = args.debug_plot_dir
+
+    def haversine_distance(lat1, lon1, lat2, lon2):
+        R = 6371000
+        dlat = radians(lat2 - lat1)
+        dlon = radians(lon2 - lon1)
+        a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+        c = 2 * atan2((a ** 0.5), ((1 - a) ** 0.5))
+        return R * c
+
+    def build_projected_crs(lat, lon):
+        return CRS.from_proj4(
+            f"+proj=aeqd +lat_0={lat} +lon_0={lon} +datum=WGS84 +units=m +no_defs"
+        )
+
+    def normalize_debug_place(place):
+        if isinstance(place, dict) and "location" in place:
+            loc = place["location"]
+            lat = loc.get("latitude") or loc.get("lat")
+            lon = loc.get("longitude") or loc.get("lon") or loc.get("lng")
+        else:
+            lat = place.get("latitude") or place.get("lat")
+            lon = place.get("longitude") or place.get("lon") or place.get("lng")
+
+        if lat is None or lon is None:
+            raise ValueError("Debug JSON place entries must include latitude and longitude.")
+
+        display_name = None
+        if isinstance(place, dict) and "displayName" in place:
+            display_name = place["displayName"]
+        elif isinstance(place, dict) and "name" in place:
+            display_name = {"text": place["name"]}
+        else:
+            display_name = {"text": "Unknown place"}
+
+        normalized = {
+            "location": {"latitude": float(lat), "longitude": float(lon)},
+            "displayName": display_name,
+        }
+        if isinstance(place, dict) and "placeId" in place:
+            normalized["placeId"] = place["placeId"]
+        return normalized
+
+    def load_debug_places(path):
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict) and "places" in payload:
+            payload = payload["places"]
+        if not isinstance(payload, list):
+            raise ValueError("Debug JSON file must contain a list of place objects or an object with a 'places' list.")
+        return [normalize_debug_place(place) for place in payload]
+
+    def debug_query_google_places(lat, lon, radius_m, max_results):
+        candidates = []
+        for place in debug_places:
+            place_lat = place["location"]["latitude"]
+            place_lon = place["location"]["longitude"]
+            distance = haversine_distance(lat, lon, place_lat, place_lon)
+            if distance <= radius_m:
+                candidates.append((distance, place))
+        candidates.sort(key=lambda item: item[0])
+        return [place for _, place in candidates[:max_results]]
+
+    def query_google_places(lat, lon, radius_m, max_results):
+        if debug_mode:
+            return debug_query_google_places(lat, lon, radius_m, max_results)
+
+        # Read API key
+        try:
+            with open("google_maps_api_key.txt", "r") as f:
+                api_key = f.read().strip()
+        except FileNotFoundError:
+            raise ValueError("API key file 'google_maps_api_key.txt' not found.")
+
+        if not api_key:
+            raise ValueError("API key is empty.")
+
+        url = "https://places.googleapis.com/v1/places:searchNearby"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": api_key,
+            "X-Goog-FieldMask": "places.displayName,places.location,places.iconMaskBaseUri"
+        }
+        data = {
+            "includedTypes": [args.type],
+            "maxResultCount": max_results,
+            "locationRestriction": {
+                "circle": {
+                    "center": {
+                        "latitude": lat,
+                        "longitude": lon
+                    },
+                    "radius": radius_m
+                }
+            },
+            "rankPreference": "DISTANCE"
+        }
+        response = requests.post(url, headers=headers, json=data)
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            print("Google Places API request failed.")
+            print(f"Status code: {response.status_code}")
+            print("Response body:")
+            print(response.text)
+            raise
+
+        result = response.json()
+        if debug_plot_dir is not None:
+            os.makedirs(debug_plot_dir, exist_ok=True)
+            debug_output_path = os.path.join(debug_plot_dir, f"debug_query_result_{lat}_{lon}.json")
+            with open(debug_output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2)
+            print(f"Saved debug query response to: {debug_output_path}")
+        return result.get("places", [])
+
+    def bbox_contains(place):
+        lat = place["location"]["latitude"]
+        lon = place["location"]["longitude"]
+        return args.min_lat <= lat <= args.max_lat and args.min_lon <= lon <= args.max_lon
+
+    def place_identifier(place):
+        if "placeId" in place:
+            return place["placeId"]
+        name = place.get("displayName", {}).get("text") if place.get("displayName") else None
+        return (name, place["location"]["latitude"], place["location"]["longitude"])
+
+    def filter_places(places, existing_ids):
+        filtered = []
+        for place in places:
+            if not bbox_contains(place):
+                continue
+            key = place_identifier(place)
+            if key in existing_ids:
+                continue
+            existing_ids.add(key)
+            filtered.append(place)
+        return filtered
+
+    def find_farthest_point(unsearched_geom, searched_geom):
+        if unsearched_geom.is_empty:
+            return None
+        minx, miny, maxx, maxy = unsearched_geom.bounds
+        if minx == maxx or miny == maxy:
+            return None
+        best_point = None
+        best_dist = -1.0
+        grid_size = 16
+        dx = (maxx - minx) / (grid_size - 1)
+        dy = (maxy - miny) / (grid_size - 1)
+        for i in range(grid_size):
+            for j in range(grid_size):
+                x = minx + i * dx
+                y = miny + j * dy
+                candidate = Point(x, y)
+                if not unsearched_geom.contains(candidate):
+                    continue
+                dist = candidate.distance(searched_geom)
+                if dist > best_dist:
+                    best_dist = dist
+                    best_point = candidate
+        if best_point is None:
+            candidate = unsearched_geom.representative_point()
+            return candidate if unsearched_geom.contains(candidate) else None
+        search_radius = max(maxx - minx, maxy - miny) / 4
+        for _ in range(4):
+            local_minx = max(minx, best_point.x - search_radius)
+            local_maxx = min(maxx, best_point.x + search_radius)
+            local_miny = max(miny, best_point.y - search_radius)
+            local_maxy = min(maxy, best_point.y + search_radius)
+            if local_minx >= local_maxx or local_miny >= local_maxy:
+                break
+            improved = False
+            for i in range(5):
+                for j in range(5):
+                    x = local_minx + i * (local_maxx - local_minx) / 4
+                    y = local_miny + j * (local_maxy - local_miny) / 4
+                    candidate = Point(x, y)
+                    if not unsearched_geom.contains(candidate):
+                        continue
+                    dist = candidate.distance(searched_geom)
+                    if dist > best_dist:
+                        best_dist = dist
+                        best_point = candidate
+                        improved = True
+            search_radius /= 2
+        return best_point
+
+    def add_searched_circle(searched_geom, center_pt, radius_m):
+        if radius_m <= 0:
+            return searched_geom
+        new_circle = center_pt.buffer(radius_m, resolution=64)
+        return unary_union([searched_geom, new_circle]) if searched_geom is not None else new_circle
+
+    def save_search_plot(iteration, searched_geom, bbox_geom, query_centers, output_dir):
+        if not output_dir:
+            return
+        os.makedirs(output_dir, exist_ok=True)
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib is required to save debug plots.")
+            return
+
+        def plot_polygon(ax, polygon, edgecolor="black", facecolor="none", alpha=0.3):
+            if polygon.is_empty:
+                return
+            if polygon.geom_type == "Polygon":
+                xs, ys = polygon.exterior.xy
+                ax.fill(xs, ys, facecolor=facecolor, alpha=alpha, edgecolor=edgecolor)
+                for interior in polygon.interiors:
+                    ix, iy = interior.xy
+                    ax.plot(ix, iy, color=edgecolor)
+            elif polygon.geom_type == "MultiPolygon":
+                for part in polygon.geoms:
+                    plot_polygon(ax, part, edgecolor=edgecolor, facecolor=facecolor, alpha=alpha)
+            else:
+                try:
+                    xs, ys = polygon.xy
+                    ax.plot(xs, ys, color=edgecolor)
+                except Exception:
+                    pass
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+        plot_polygon(ax, bbox_geom, edgecolor="black", facecolor="none", alpha=1.0)
+        if searched_geom is not None and not searched_geom.is_empty:
+            plot_polygon(ax, searched_geom, edgecolor="red", facecolor="red", alpha=0.25)
+        for idx, center_pt in enumerate(query_centers, start=1):
+            ax.plot(center_pt.x, center_pt.y, marker="o", color="blue", markersize=4)
+            ax.text(center_pt.x, center_pt.y, str(idx), fontsize=6, color="blue")
+        ax.set_title(f"Search area after iteration {iteration}")
+        ax.set_aspect("equal", "box")
+        ax.set_xlabel("Easting (m)")
+        ax.set_ylabel("Northing (m)")
+        minx, miny, maxx, maxy = bbox_geom.bounds
+        pad_x = (maxx - minx) * 0.02
+        pad_y = (maxy - miny) * 0.02
+        ax.set_xlim(minx - pad_x, maxx + pad_x)
+        ax.set_ylim(miny - pad_y, maxy + pad_y)
+        output_path = os.path.join(output_dir, f"search_area_{iteration:03d}.png")
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    center_lat = (args.min_lat + args.max_lat) / 2
+    center_lon = (args.min_lon + args.max_lon) / 2
+    bbox_wgs84 = box(args.min_lon, args.min_lat, args.max_lon, args.max_lat)
+    projected_crs = build_projected_crs(center_lat, center_lon)
+    to_projected = Transformer.from_crs("EPSG:4326", projected_crs, always_xy=True)
+    to_wgs84 = Transformer.from_crs(projected_crs, "EPSG:4326", always_xy=True)
+    bbox_m = shapely_transform(to_projected.transform, bbox_wgs84)
+    center_m = Point(to_projected.transform(center_lon, center_lat))
+    query_centers = [center_m]
+
+    if debug_mode:
+        debug_places = load_debug_places(args.debug_json)
+
+    first_query_size = min(20, args.max_results)
+    initial_radius_m = min(50000, haversine_distance(center_lat, center_lon, args.max_lat, args.max_lon))
+    print(f"Fetching up to {first_query_size} places from center query...")
+    print(f"Search center: {center_lat:.6f}, {center_lon:.6f}")
+    print(f"Search radius: {initial_radius_m:.0f} meters")
+    first_results = query_google_places(center_lat, center_lon, initial_radius_m, first_query_size)
+    if not first_results:
+        print("No places found.")
+        return
+    excluded_count = len([p for p in first_results if not bbox_contains(p)])
+    if excluded_count > 0:
+        print(f"Excluded {excluded_count} place(s) outside the bounding box.")
+    unique_places = filter_places(first_results, set())
+    existing_ids = {place_identifier(place) for place in unique_places}
+    print(f"Found {len(unique_places)} unique places inside the bounding box.")
+
+    if (args.max_results <= 20 or len(first_results) < 20) and initial_radius_m < 50000:
+        if debug_plot_dir:
+            initial_circle = center_m.buffer(initial_radius_m, resolution=64)
+            save_search_plot(1, initial_circle, bbox_m, query_centers, debug_plot_dir)
+        results_to_write = unique_places[: args.max_results]
+    else:
+        eps_m = 0.1
+        last_place = first_results[-1]
+        last_lat = last_place["location"]["latitude"]
+        last_lon = last_place["location"]["longitude"]
+        last_dist_m = 50000 if len(first_results) < 20 else haversine_distance(center_lat, center_lon, last_lat, last_lon)
+        searched_area_m = add_searched_circle(None, center_m, max(last_dist_m - eps_m, 0.0))
+        unsearched_area_m = bbox_m.difference(searched_area_m)
+        request_count = 1
+        if debug_plot_dir:
+            save_search_plot(request_count, searched_area_m, bbox_m, query_centers, debug_plot_dir)
+        while len(unique_places) < args.max_results and not unsearched_area_m.is_empty:
+            next_center_m = find_farthest_point(unsearched_area_m, searched_area_m)
+            if next_center_m is None:
+                break
+            next_center_lon, next_center_lat = to_wgs84.transform(next_center_m.x, next_center_m.y)
+            # Find furthest point in unsearched area from next_center_m
+            minx, miny, maxx, maxy = unsearched_area_m.bounds
+            corners = [
+                Point(minx, miny), Point(minx, maxy),
+                Point(maxx, miny), Point(maxx, maxy)
+            ]
+            next_radius_m = min(50000, max(next_center_m.distance(corner) for corner in corners))
+            remaining_needed = args.max_results - len(unique_places)
+            next_query_count = min(20, remaining_needed)
+            request_count += 1
+            query_centers.append(next_center_m)
+            print(f"Performing query #{request_count} at {next_center_lat:.6f}, {next_center_lon:.6f} with radius {next_radius_m:.0f} meters")
+            next_results = query_google_places(next_center_lat, next_center_lon, next_radius_m, next_query_count)
+            if not next_results:
+                searched_area_m = add_searched_circle(searched_area_m, next_center_m, next_radius_m)
+                unsearched_area_m = bbox_m.difference(searched_area_m)
+                if debug_plot_dir:
+                    save_search_plot(request_count, searched_area_m, bbox_m, query_centers, debug_plot_dir)
+                continue
+            unique_places.extend(filter_places(next_results, existing_ids))
+            if len(next_results) == next_query_count:
+                last_place = next_results[-1]
+                last_lat = last_place["location"]["latitude"]
+                last_lon = last_place["location"]["longitude"]
+                last_dist_m = haversine_distance(next_center_lat, next_center_lon, last_lat, last_lon)
+                circle_radius = max(last_dist_m - eps_m, 0.0)
+            else:
+                circle_radius = max(next_radius_m - eps_m, 0.0)
+            searched_area_m = add_searched_circle(searched_area_m, next_center_m, circle_radius)
+            unsearched_area_m = bbox_m.difference(searched_area_m)
+            if debug_plot_dir:
+                save_search_plot(request_count, searched_area_m, bbox_m, query_centers, debug_plot_dir)
+        results_to_write = unique_places[: args.max_results]
+        print(f"Collected {len(unique_places)} unique places after {request_count} requests.")
+
+    if not results_to_write:
+        print("No places remain inside the bounding box.")
+        return
+
+    print(f"Preparing {len(results_to_write)} place(s) for output.")
+
+    icon_uris = sorted(set((place.get("iconMaskBaseUri", "") for place in results_to_write)))
+    if len(icon_uris) > 1:
+        print("Multiple icons were found in the results.")
+        for idx, uri in enumerate(icon_uris, start=1):
+            print(f"  {idx}: {uri}")
+        try:
+            answer = int(input(f"Which would you like to use? (1-{len(icon_uris)}): ").strip())
+        except ValueError:
+            answer = 0
+        if answer < 1 or answer > len(icon_uris):
+            print("Invalid choice. Defaulting to the first icon.")
+            answer = 1
+        chosen_icon_uri = icon_uris[answer - 1]
+        results_to_write = [place for place in results_to_write if place.get("iconMaskBaseUri", "") == chosen_icon_uri]
+
+    import geopandas as gpd
+
+    names = []
+    geometries = []
+    for place in results_to_write:
+        lat = place["location"]["latitude"]
+        lon = place["location"]["longitude"]
+        name = place.get("displayName", {}).get("text", "Unknown place")
+        names.append(name)
+        geometries.append(Point(lon, lat))
+
+    gdf = gpd.GeoDataFrame({"name": names}, geometry=geometries, crs="EPSG:4326")
+
+    from lxml import etree as ET
+    import io
+
+    ns = {"kml": "http://www.opengis.net/kml/2.2"}
+    kml_content = read_kml_from_file(args.input_kml)
+    tree = ET.parse(io.BytesIO(kml_content))
+    root = tree.getroot()
+    document = root.find(".//kml:Document", ns)
+    if document is None:
+        raise ValueError("No Document element found in input KML.")
+
+    layer_name = args.type.replace("_", " ").title()
+    places_folder = ET.SubElement(document, "Folder")
+    ET.SubElement(places_folder, "name").text = layer_name
+    for name, geom in zip(names, geometries):
+        placemark = ET.SubElement(places_folder, "Placemark")
+        ET.SubElement(placemark, "name").text = name
+        point = ET.SubElement(placemark, "Point")
+        coords = ET.SubElement(point, "coordinates")
+        coords.text = f"{geom.x},{geom.y},0"
+
+    kml_output_content = format_xml_string(root)
+    write_kml_to_file(kml_output_content, args.output_kml, args.input_kml)
+
+    print(f"Added {len(results_to_write)} places to new layer '{layer_name}'.")
     print(f"Wrote output to: {args.output_kml}")
 
 
