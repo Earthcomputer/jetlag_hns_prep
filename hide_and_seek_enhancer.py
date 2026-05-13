@@ -157,6 +157,7 @@ def format_xml_string(element_tree_element: 'ET.Element') -> str:
     # Clean up namespace prefixes added by lxml conversion (replace ns0:, ns1:, etc. with default namespace)
     import re
     result = re.sub(r'\bns\d+:', '', result)
+    result = re.sub(r':ns\d+\b', '', result)
     
     return result
 
