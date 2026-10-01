@@ -628,11 +628,14 @@ def main():
 
     # Split layer command
     split_parser = subparsers.add_parser(
-        "split-layer", help="Split a layer by the 'type' attribute into separate layers"
+        "split-layer", help="Split a layer by a data attribute into separate layers"
     )
     split_parser.add_argument("input_kml", help="Input KML or KMZ file")
     split_parser.add_argument("output_kml", help="Output KML or KMZ with split layers")
     split_parser.add_argument("layer_name", help="Name of the layer to split")
+    split_parser.add_argument(
+        "--field-name", default="type", help="Data attribute to split by (default: type)"
+    )
 
     # Contour command
     contour_parser = subparsers.add_parser(
@@ -782,7 +785,7 @@ def main():
     elif args.command == "voronoi":
         generate_voronoi_command(args)
     elif args.command == "split-layer":
-        split_layer_command(args.input_kml, args.output_kml, args.layer_name)
+        split_layer_command(args.input_kml, args.output_kml, args.layer_name, args.field_name)
     elif args.command == "contour":
         generate_contour_command(args)
     elif args.command == "hide-layers":
@@ -865,8 +868,8 @@ def list_layers_command(input_kml: str):
         print("\nNon-point layers: None")
 
 
-def split_layer_command(input_kml: str, output_kml: str, layer_name: str):
-    """Split a layer by the 'type' attribute into separate layers, keeping other layers unchanged."""
+def split_layer_command(input_kml: str, output_kml: str, layer_name: str, field_name: str = "type"):
+    """Split a layer by a data attribute into separate layers, keeping other layers unchanged."""
     from lxml import etree as ET
     import io
 
@@ -888,7 +891,7 @@ def split_layer_command(input_kml: str, output_kml: str, layer_name: str):
     # Find the target folder and extract its placemarks
     target_folder = None
     target_folder_index = None
-    type_groups = {}
+    field_groups = {}
 
     for i, folder in enumerate(document.findall("kml:Folder", ns)):
         folder_name_elem = folder.find("kml:name", ns)
@@ -899,36 +902,36 @@ def split_layer_command(input_kml: str, output_kml: str, layer_name: str):
             target_folder = folder
             target_folder_index = i
             
-            # Group placemarks by type
+            # Group placemarks by the selected data attribute
             for placemark in folder.findall("kml:Placemark", ns):
-                placemark_type = None
+                field_value = None
 
-                # Try to extract type from ExtendedData
+                # Try to extract the selected field from ExtendedData
                 for data in placemark.findall(".//kml:Data", ns):
                     name_attr = data.get("name")
-                    if name_attr == "type":
+                    if name_attr == field_name:
                         value_elem = data.find("kml:value", ns)
                         if value_elem is not None and value_elem.text:
-                            placemark_type = value_elem.text.strip()
+                            field_value = value_elem.text.strip()
                         break
 
-                if placemark_type is None:
-                    placemark_type = "Unknown"
+                if field_value is None:
+                    field_value = "Unknown"
 
-                if placemark_type not in type_groups:
-                    type_groups[placemark_type] = []
-                type_groups[placemark_type].append(placemark)
+                if field_value not in field_groups:
+                    field_groups[field_value] = []
+                field_groups[field_value].append(placemark)
             break
 
     if target_folder is None:
         raise ValueError(f"Layer '{layer_name}' not found in KML.")
 
-    if not type_groups:
+    if not field_groups:
         raise ValueError(f"No placemarks found in layer '{layer_name}'.")
 
-    print(f"\nFound {len(type_groups)} type(s):")
-    for type_name, placemarks in sorted(type_groups.items()):
-        print(f"  - {type_name}: {len(placemarks)} feature(s)")
+    print(f"\nFound {len(field_groups)} value(s) for '{field_name}':")
+    for field_value, placemarks in sorted(field_groups.items()):
+        print(f"  - {field_value}: {len(placemarks)} feature(s)")
 
     # Create output KML with split layers replacing the original
     print("\nWriting output KML...")
@@ -959,15 +962,15 @@ def split_layer_command(input_kml: str, output_kml: str, layer_name: str):
             folder_count += 1
         else:
             # Add split folders for this layer
-            for type_name in sorted(type_groups.keys()):
+            for field_value in sorted(field_groups.keys()):
                 split_folder = ET.SubElement(out_document, "Folder")
-                ET.SubElement(split_folder, "name").text = type_name
+                ET.SubElement(split_folder, "name").text = field_value
                 # Copy visibility from the original folder if it exists
                 visibility_elem = target_folder.find("kml:visibility", ns)
                 if visibility_elem is not None:
                     ET.SubElement(split_folder, "visibility").text = visibility_elem.text
 
-                for placemark in type_groups[type_name]:
+                for placemark in field_groups[field_value]:
                     split_folder.append(deepcopy(placemark))
                 folder_count += 1
 
@@ -978,7 +981,7 @@ def split_layer_command(input_kml: str, output_kml: str, layer_name: str):
     # Write output (handles both .kml and .kmz)
     write_kml_to_file(kml_output_content, output_kml, input_kml)
 
-    total_features = sum(len(placemarks) for placemarks in type_groups.values())
+    total_features = sum(len(placemarks) for placemarks in field_groups.values())
     print(f"\nWrote {folder_count} layer(s) with {total_features} total feature(s) to: {output_kml}")
 
 
