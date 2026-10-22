@@ -11,6 +11,9 @@ Usage:
     python hide_and_seek_enhancer.py list input_points.kml
     python hide_and_seek_enhancer.py list input_points.kmz
 
+    # List the features (names, locations, styles) within a layer
+    python hide_and_seek_enhancer.py list-features input.kml "LayerName"
+
     # Generate Voronoi diagrams for all layers (preserves existing layers)
     python hide_and_seek_enhancer.py voronoi input_points.kml output_voronoi.kml
     python hide_and_seek_enhancer.py voronoi input_points.kmz output_voronoi.kmz
@@ -45,6 +48,9 @@ Usage:
     # Delete layers from a KML or KMZ file
     python hide_and_seek_enhancer.py delete-layers input.kml output.kml \
         --layers Layer1,Layer2
+
+    # Rename a layer
+    python hide_and_seek_enhancer.py rename-layer input.kml output.kml "OldName" "NewName"
 
     # Copy features from one layer to another existing layer
     python hide_and_seek_enhancer.py copy-layer input.kml output.kml \
