@@ -316,6 +316,15 @@ def save_search_plot(iteration, searched_geom, bbox_geom, query_centers, output_
     plt.close(fig)
 
 
+def farthest_result_distance(lat: float, lon: float, places: list[dict]) -> float:
+    """
+    Distance in metres to the farthest of the returned places. Only the area within this is
+    known to be searched: Google can return fewer places than asked for even when more exist
+    further out, and does not always order them strictly by distance.
+    """
+    return max(haversine_distance(lat, lon, *place_location(place)) for place in places)
+
+
 def search_places(query, place_filter: PlaceFilter, args) -> list[dict] | None:
     """
     Query repeatedly until max_results places are found or the whole bbox has been searched.
@@ -353,18 +362,8 @@ def search_places(query, place_filter: PlaceFilter, args) -> list[dict] | None:
     unique_places = place_filter(first_results)
     print(f"Found {len(unique_places)} unique places inside the bounding box.")
 
-    first_query_was_complete = (args.max_results <= MAX_PAGE_SIZE and not filtering_reviews) or len(first_results) < MAX_PAGE_SIZE
-    if first_query_was_complete and initial_radius_m < MAX_RADIUS_M:
-        if debug_plot_dir:
-            initial_circle = center_m.buffer(initial_radius_m, resolution=64)
-            save_search_plot(1, initial_circle, bbox_m, query_centers, debug_plot_dir)
-        return unique_places[: args.max_results]
-
     eps_m = 0.1
-    if len(first_results) < MAX_PAGE_SIZE:
-        last_dist_m = MAX_RADIUS_M
-    else:
-        last_dist_m = haversine_distance(center_lat, center_lon, *place_location(first_results[-1]))
+    last_dist_m = farthest_result_distance(center_lat, center_lon, first_results)
     searched_area_m = add_searched_circle(None, center_m, max(last_dist_m - eps_m, 0.0))
     unsearched_area_m = bbox_m.difference(searched_area_m)
     request_count = 1
@@ -388,12 +387,8 @@ def search_places(query, place_filter: PlaceFilter, args) -> list[dict] | None:
 
         if next_results:
             unique_places.extend(place_filter(next_results))
-        if next_results and len(next_results) == next_query_count:
-            # A full page means there may be more places beyond the farthest one returned
-            last_dist_m = haversine_distance(next_center_lat, next_center_lon, *place_location(next_results[-1]))
+            last_dist_m = farthest_result_distance(next_center_lat, next_center_lon, next_results)
             circle_radius = max(last_dist_m - eps_m, 0.0)
-        elif next_results:
-            circle_radius = max(next_radius_m - eps_m, 0.0)
         else:
             circle_radius = next_radius_m
         searched_area_m = add_searched_circle(searched_area_m, next_center_m, circle_radius)
