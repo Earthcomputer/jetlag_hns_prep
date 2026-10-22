@@ -6,10 +6,12 @@ from hns.commands import (
     delete_layers,
     elevation,
     fetch_places,
+    fetch_routes,
     hide_layers,
     list_features,
     list_fields,
     list_layers,
+    merge_layers,
     rename_layer,
     sort_layers,
     split_layer,
@@ -17,4 +19,4 @@ from hns.commands import (
 )
 
 # In the order they appear in --help
-COMMANDS = [list_layers, list_features, voronoi, list_fields, split_layer, contour, elevation, hide_layers, delete_layers, rename_layer, sort_layers, copy_layer, fetch_places]
+COMMANDS = [list_layers, list_features, voronoi, list_fields, split_layer, contour, elevation, hide_layers, delete_layers, rename_layer, sort_layers, copy_layer, merge_layers, fetch_places, fetch_routes]

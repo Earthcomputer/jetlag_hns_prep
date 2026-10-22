@@ -21,7 +21,7 @@ def run(args):
     target_folder = find_folder(document, args.layer_name)
 
     field_groups = {}
-    for placemark in target_folder.findall("kml:Placemark", NS):
+    for placemark in target_folder.findall(".//kml:Placemark", NS):
         value = placemark_data(placemark).get(args.field_name) or "Unknown"
         field_groups.setdefault(value, []).append(placemark)
 

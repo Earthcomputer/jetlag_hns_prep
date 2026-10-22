@@ -23,7 +23,7 @@ def describe_location(geom) -> str:
 def run(args):
     print(f"Reading KML: {args.input_kml}")
     document = find_document(load_kml(args.input_kml))
-    placemarks = find_folder(document, args.layer_name).findall("kml:Placemark", NS)
+    placemarks = find_folder(document, args.layer_name).findall(".//kml:Placemark", NS)
 
     print(f"\nLayer '{args.layer_name}' has {len(placemarks)} feature(s)")
     if not placemarks:

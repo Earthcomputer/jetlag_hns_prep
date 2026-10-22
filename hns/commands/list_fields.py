@@ -25,7 +25,7 @@ def shorten(value: str) -> str:
 def run(args):
     print(f"Reading KML: {args.input_kml}")
     document = find_document(load_kml(args.input_kml))
-    placemarks = find_folder(document, args.layer_name).findall("kml:Placemark", NS)
+    placemarks = find_folder(document, args.layer_name).findall(".//kml:Placemark", NS)
 
     # Field name -> counts of its non-empty values, in order of first appearance
     field_values: dict[str, Counter] = {}

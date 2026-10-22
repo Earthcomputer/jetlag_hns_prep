@@ -23,7 +23,7 @@ def run(args):
     source_folder = find_folder(document, args.from_layer, "Source layer")
     target_folder = find_folder(document, args.to_layer, "Target layer")
 
-    placemarks = source_folder.findall("kml:Placemark", NS)
+    placemarks = source_folder.findall(".//kml:Placemark", NS)
     target_folder.extend(deepcopy(placemark) for placemark in placemarks)
 
     print(f"Copied {len(placemarks)} feature(s) from '{args.from_layer}' to '{args.to_layer}'.")

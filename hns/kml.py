@@ -127,17 +127,17 @@ def hide_folder(folder: etree._Element):
     visibility.text = "0"
 
 
-def add_line_style_map(document: etree._Element, style_id: str, color: str):
+def add_line_style_map(document: etree._Element, style_id: str, color: str, width: float = 2.0):
     """
-    Add a StyleMap with id style_id for lines of the given colour (AABBGGRR),
+    Add a StyleMap with id style_id for lines of the given colour (AABBGGRR) and width,
     drawn thicker when highlighted. Placemarks reference it as f"#{style_id}".
     """
     elements = []
-    for state, width in (("normal", "2.0"), ("highlight", "3.0")):
+    for state, state_width in (("normal", width), ("highlight", width + 1.0)):
         style = etree.Element(kml_tag("Style"), id=f"{style_id}-{state}")
         line_style = add_element(style, "LineStyle")
         add_element(line_style, "color", color)
-        add_element(line_style, "width", width)
+        add_element(line_style, "width", f"{state_width:g}")
         elements.append(style)
 
     style_map = etree.Element(kml_tag("StyleMap"), id=style_id)
@@ -151,19 +151,48 @@ def add_line_style_map(document: etree._Element, style_id: str, color: str):
     document[index:index] = elements
 
 
-def add_point_placemark(folder: etree._Element, name: str, lon: float, lat: float):
+def add_label_style(document: etree._Element, style_id: str, color: str, scale: float = 1.0):
+    """
+    Add a Style with id style_id for points shown only as their name, in the given colour (AABBGGRR),
+    with no icon. Placemarks reference it as f"#{style_id}".
+    """
+    style = etree.Element(kml_tag("Style"), id=style_id)
+    icon_style = add_element(style, "IconStyle")
+    add_element(icon_style, "scale", "0")
+    add_element(icon_style, "Icon")
+    label_style = add_element(style, "LabelStyle")
+    add_element(label_style, "color", color)
+    add_element(label_style, "scale", f"{scale:g}")
+    index = next((i for i, child in enumerate(document) if child.tag in FEATURE_TAGS), len(document))
+    document.insert(index, style)
+
+
+def add_point_placemark(folder: etree._Element, name: str, lon: float, lat: float, style_id: str | None = None):
     placemark = add_element(folder, "Placemark")
     add_element(placemark, "name", name)
+    if style_id is not None:
+        add_element(placemark, "styleUrl", f"#{style_id}")
     point = add_element(placemark, "Point")
     add_element(point, "coordinates", f"{lon},{lat},0")
 
 
-def add_line_placemark(folder: etree._Element, name: str, line: LineString, style_id: str):
+def add_line_placemark(
+    folder: etree._Element,
+    name: str,
+    line: LineString | MultiLineString,
+    style_id: str,
+    description: str | None = None,
+):
+    """Add a line placemark; a MultiLineString becomes a MultiGeometry of LineStrings."""
     placemark = add_element(folder, "Placemark")
     add_element(placemark, "name", name)
+    if description is not None:
+        add_element(placemark, "description", description)
     add_element(placemark, "styleUrl", f"#{style_id}")
-    linestring = add_element(placemark, "LineString")
-    add_element(linestring, "coordinates", " ".join(f"{x},{y},0" for x, y, *_ in line.coords))
+    parent = add_element(placemark, "MultiGeometry") if isinstance(line, MultiLineString) else placemark
+    for part in getattr(line, "geoms", [line]):
+        linestring = add_element(parent, "LineString")
+        add_element(linestring, "coordinates", " ".join(f"{x},{y},0" for x, y, *_ in part.coords))
 
 
 def parse_kml_coordinates(coords_text: str) -> list[tuple[float, float]]:
@@ -222,14 +251,15 @@ def placemark_geometry(placemark: etree._Element):
 
 def extract_layers(root: etree._Element) -> dict[str, gpd.GeoDataFrame]:
     """
-    Extract geometries organized by Folder (layer).
+    Extract geometries organized by top-level Folder (layer), including those in its sublayers (subfolders).
     Returns a dict mapping layer names to GeoDataFrames; folders without geometries are omitted.
     """
     layers = {}
-    for folder in root.iterfind(".//kml:Folder", NS):
+    document = root.find(".//kml:Document", NS)
+    for folder in top_level_folders(document if document is not None else root):
         names = []
         geometries = []
-        for placemark in folder.findall("kml:Placemark", NS):
+        for placemark in folder.iterfind(".//kml:Placemark", NS):
             geom = placemark_geometry(placemark)
             if geom is not None and not geom.is_empty:
                 name_elem = placemark.find("kml:name", NS)
