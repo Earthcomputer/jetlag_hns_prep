@@ -157,7 +157,14 @@ def format_xml_string(element_tree_element: 'ET.Element') -> str:
     # Clean up element and attribute prefixes without changing xmlns declarations.
     import re
     result = re.sub(r'(?<!xmlns:)\bns\d+:', '', result)
-    
+    # Elements are now unprefixed, so the prefixed declaration must become the default namespace,
+    # unless the root already declares one (in which case it would be a duplicate).
+    root_tag = re.search(r'<kml\b[^>]*>', result)
+    if root_tag and re.search(r'\sxmlns="', root_tag.group(0)):
+        result = re.sub(r'\s+xmlns:ns\d+="[^"]*"', '', result)
+    else:
+        result = re.sub(r'\bxmlns:ns\d+=', 'xmlns=', result)
+
     return result
 
 
@@ -734,7 +741,11 @@ def main():
     fetch_parser.add_argument(
         "--type",
         required=True,
-        help="Place type to search for (see https://developers.google.com/maps/documentation/places/web-service/place-types)",
+        help="Place type(s) to search for, comma-separated, e.g. park,dog_park (see https://developers.google.com/maps/documentation/places/web-service/place-types)",
+    )
+    fetch_parser.add_argument(
+        "--layer-name",
+        help="Name of the new layer (defaults to a name derived from --type)",
     )
     fetch_parser.add_argument(
         "--max-results",
@@ -775,6 +786,12 @@ def main():
         "--debug-plot-dir",
         type=str,
         help="Directory to write PNGs showing the searched area after each query iteration",
+    )
+    fetch_parser.add_argument(
+        "--min-reviews",
+        type=int,
+        default=None,
+        help="Only include places with at least this many Google Maps reviews",
     )
 
     args = parser.parse_args()
@@ -1603,6 +1620,11 @@ def fetch_places_command(args):
 
     debug_mode = args.debug_json is not None
     debug_plot_dir = args.debug_plot_dir
+    min_reviews = args.min_reviews
+    place_types = [t.strip() for t in args.type.split(",") if t.strip()]
+    if not place_types:
+        raise ValueError("--type must contain at least one place type.")
+    review_excluded_count = 0
 
     def haversine_distance(lat1, lon1, lat2, lon2):
         R = 6371000
@@ -1643,6 +1665,8 @@ def fetch_places_command(args):
         }
         if isinstance(place, dict) and "placeId" in place:
             normalized["placeId"] = place["placeId"]
+        if isinstance(place, dict) and "userRatingCount" in place:
+            normalized["userRatingCount"] = int(place["userRatingCount"])
         return normalized
 
     def load_debug_places(path):
@@ -1680,13 +1704,16 @@ def fetch_places_command(args):
             raise ValueError("API key is empty.")
 
         url = "https://places.googleapis.com/v1/places:searchNearby"
+        field_mask = "places.displayName,places.location,places.iconMaskBaseUri"
+        if min_reviews is not None:
+            field_mask += ",places.userRatingCount"
         headers = {
             "Content-Type": "application/json",
             "X-Goog-Api-Key": api_key,
-            "X-Goog-FieldMask": "places.displayName,places.location,places.iconMaskBaseUri"
+            "X-Goog-FieldMask": field_mask
         }
         data = {
-            "includedTypes": [args.type],
+            "includedTypes": place_types,
             "maxResultCount": max_results,
             "locationRestriction": {
                 "circle": {
@@ -1729,7 +1756,12 @@ def fetch_places_command(args):
         name = place.get("displayName", {}).get("text") if place.get("displayName") else None
         return (name, place["location"]["latitude"], place["location"]["longitude"])
 
+    def has_enough_reviews(place):
+        # Places with no reviews omit userRatingCount entirely
+        return min_reviews is None or place.get("userRatingCount", 0) >= min_reviews
+
     def filter_places(places, existing_ids):
+        nonlocal review_excluded_count
         filtered = []
         for place in places:
             if not bbox_contains(place):
@@ -1738,6 +1770,9 @@ def fetch_places_command(args):
             if key in existing_ids:
                 continue
             existing_ids.add(key)
+            if not has_enough_reviews(place):
+                review_excluded_count += 1
+                continue
             filtered.append(place)
         return filtered
 
@@ -1858,7 +1893,8 @@ def fetch_places_command(args):
     if debug_mode:
         debug_places = load_debug_places(args.debug_json)
 
-    first_query_size = min(20, args.max_results)
+    # When filtering by reviews, some results get discarded, so always request a full page
+    first_query_size = 20 if min_reviews is not None else min(20, args.max_results)
     initial_radius_m = min(50000, haversine_distance(center_lat, center_lon, args.max_lat, args.max_lon))
     print(f"Fetching up to {first_query_size} places from center query...")
     print(f"Search center: {center_lat:.6f}, {center_lon:.6f}")
@@ -1870,11 +1906,11 @@ def fetch_places_command(args):
     excluded_count = len([p for p in first_results if not bbox_contains(p)])
     if excluded_count > 0:
         print(f"Excluded {excluded_count} place(s) outside the bounding box.")
-    unique_places = filter_places(first_results, set())
-    existing_ids = {place_identifier(place) for place in unique_places}
+    existing_ids = set()
+    unique_places = filter_places(first_results, existing_ids)
     print(f"Found {len(unique_places)} unique places inside the bounding box.")
 
-    if (args.max_results <= 20 or len(first_results) < 20) and initial_radius_m < 50000:
+    if ((args.max_results <= 20 and min_reviews is None) or len(first_results) < 20) and initial_radius_m < 50000:
         if debug_plot_dir:
             initial_circle = center_m.buffer(initial_radius_m, resolution=64)
             save_search_plot(1, initial_circle, bbox_m, query_centers, debug_plot_dir)
@@ -1903,7 +1939,7 @@ def fetch_places_command(args):
             ]
             next_radius_m = min(50000, max(next_center_m.distance(corner) for corner in corners))
             remaining_needed = args.max_results - len(unique_places)
-            next_query_count = min(20, remaining_needed)
+            next_query_count = 20 if min_reviews is not None else min(20, remaining_needed)
             request_count += 1
             query_centers.append(next_center_m)
             print(f"Performing query #{request_count} at {next_center_lat:.6f}, {next_center_lon:.6f} with radius {next_radius_m:.0f} meters")
@@ -1929,6 +1965,9 @@ def fetch_places_command(args):
                 save_search_plot(request_count, searched_area_m, bbox_m, query_centers, debug_plot_dir)
         results_to_write = unique_places[: args.max_results]
         print(f"Collected {len(unique_places)} unique places after {request_count} requests.")
+
+    if min_reviews is not None:
+        print(f"Excluded {review_excluded_count} place(s) with fewer than {min_reviews} reviews.")
 
     if not results_to_write:
         print("No places remain inside the bounding box.")
@@ -1975,7 +2014,7 @@ def fetch_places_command(args):
     if document is None:
         raise ValueError("No Document element found in input KML.")
 
-    layer_name = args.type.replace("_", " ").title()
+    layer_name = args.layer_name or ", ".join(t.replace("_", " ").title() for t in place_types)
     places_folder = ET.SubElement(document, "Folder")
     ET.SubElement(places_folder, "name").text = layer_name
     for name, geom in zip(names, geometries):
