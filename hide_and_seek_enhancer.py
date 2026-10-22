@@ -41,6 +41,11 @@ Usage:
         --step-km 10 --secondary-step-km 2 --secondary-threshold-km 10 \
         --max-distance-km 50
 
+    # Add elevation contour lines every 10 m (darker every 50 m) over the extent of a layer,
+    # using free elevation data from AWS Terrain Tiles
+    python hide_and_seek_enhancer.py elevation input.kml output_elevation.kml \
+        --area-layer "game boandaries" --step-m 10 --major-step-m 50
+
     # Hide all layers except some
     python hide_and_seek_enhancer.py hide-layers input.kml output.kml \
         --exclude-layers Layer1,Layer2
@@ -70,7 +75,7 @@ Usage:
         --min-lon -2.0 --min-lat 51.0 --max-lon -1.0 --max-lat 52.0
 
 Dependencies:
-    pip install geopandas scipy shapely pyproj fiona lxml requests
+    pip install geopandas scipy shapely pyproj fiona lxml requests contourpy pillow
 """
 
 from hns.cli import main
