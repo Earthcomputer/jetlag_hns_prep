@@ -52,6 +52,14 @@ Usage:
     # Rename a layer
     python hide_and_seek_enhancer.py rename-layer input.kml output.kml "OldName" "NewName"
 
+    # Sort layers alphabetically, with some layers kept first and some last
+    python hide_and_seek_enhancer.py sort-layers input.kml output.kml \
+        --first Layer1,Layer2 --last Layer3
+
+    # Only move some layers to the start or end, keeping the order of the others
+    python hide_and_seek_enhancer.py sort-layers input.kml output.kml \
+        --first Layer1 --last Layer3 --keep
+
     # Copy features from one layer to another existing layer
     python hide_and_seek_enhancer.py copy-layer input.kml output.kml \
         --from-layer SourceLayer --to-layer TargetLayer

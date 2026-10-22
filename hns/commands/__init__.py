@@ -10,9 +10,10 @@ from hns.commands import (
     list_fields,
     list_layers,
     rename_layer,
+    sort_layers,
     split_layer,
     voronoi,
 )
 
 # In the order they appear in --help
-COMMANDS = [list_layers, list_features, voronoi, list_fields, split_layer, contour, hide_layers, delete_layers, rename_layer, copy_layer, fetch_places]
+COMMANDS = [list_layers, list_features, voronoi, list_fields, split_layer, contour, hide_layers, delete_layers, rename_layer, sort_layers, copy_layer, fetch_places]
