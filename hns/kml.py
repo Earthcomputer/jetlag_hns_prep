@@ -90,6 +90,17 @@ def find_folder(document: etree._Element, name: str, description: str = "Layer")
     raise ValueError(f"{description} '{name}' not found in KML/KMZ.")
 
 
+def placemark_data(placemark: etree._Element) -> dict[str, str | None]:
+    """Return a placemark's ExtendedData fields as {name: value}, with None for empty values."""
+    fields = {}
+    for data in placemark.iterfind(".//kml:Data", NS):
+        value_elem = data.find("kml:value", NS)
+        value = value_elem.text.strip() if value_elem is not None and value_elem.text else None
+        # Keep the first value if a field name is repeated
+        fields.setdefault(data.get("name"), value)
+    return fields
+
+
 def new_folder(name: str, visibility: str | None = None) -> etree._Element:
     """Create a detached Folder element, e.g. for inserting at a specific position."""
     folder = etree.Element(kml_tag("Folder"))

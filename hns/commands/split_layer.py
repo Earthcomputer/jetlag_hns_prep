@@ -1,7 +1,7 @@
 """Split a layer by a data attribute into separate layers, keeping other layers unchanged."""
 
 from hns.commands.common import add_io_arguments
-from hns.kml import NS, find_document, find_folder, load_kml, new_folder, top_level_folders, write_kml
+from hns.kml import NS, find_document, find_folder, load_kml, new_folder, placemark_data, top_level_folders, write_kml
 
 
 def register(subparsers):
@@ -10,15 +10,6 @@ def register(subparsers):
     parser.add_argument("layer_name", help="Name of the layer to split")
     parser.add_argument("--field-name", default="type", help="Data attribute to split by (default: type)")
     parser.set_defaults(func=run)
-
-
-def placemark_data_value(placemark, field_name: str) -> str | None:
-    """Return the value of the named ExtendedData field of a placemark, if set."""
-    for data in placemark.iterfind(".//kml:Data", NS):
-        if data.get("name") == field_name:
-            value_elem = data.find("kml:value", NS)
-            return value_elem.text.strip() if value_elem is not None and value_elem.text else None
-    return None
 
 
 def run(args):
@@ -31,7 +22,7 @@ def run(args):
 
     field_groups = {}
     for placemark in target_folder.findall("kml:Placemark", NS):
-        value = placemark_data_value(placemark, args.field_name) or "Unknown"
+        value = placemark_data(placemark).get(args.field_name) or "Unknown"
         field_groups.setdefault(value, []).append(placemark)
 
     if not field_groups:

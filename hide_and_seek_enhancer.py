@@ -23,6 +23,9 @@ Usage:
     python hide_and_seek_enhancer.py voronoi input_points.kml output_voronoi.kml \
         --min-lon -2.0 --min-lat 51.0 --max-lon -1.0 --max-lat 52.0
 
+    # List the data fields of a layer that split-layer can split by
+    python hide_and_seek_enhancer.py list-fields input.kml "LayerName"
+
     # Split a layer by type into separate layers
     python hide_and_seek_enhancer.py split-layer input.kml output_split.kml "LayerName"
 
