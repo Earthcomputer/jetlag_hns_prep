@@ -17,7 +17,7 @@ from PIL import Image
 from scipy.ndimage import gaussian_filter
 from shapely.geometry import LineString, box
 
-from hns.commands.common import add_bbox_arguments, add_io_arguments, bbox_from_args, validate_optional_bbox
+from hns.commands.common import add_bbox_arguments, add_io_arguments, bbox_from_args, validate_bbox
 from hns.geo import haversine_distance
 from hns.kml import (
     add_folder,
@@ -52,12 +52,7 @@ def register(subparsers):
         default=50.0,
         help="Interval in metres of the contours drawn darker, a multiple of --step-m (default 50)",
     )
-    parser.add_argument(
-        "--area-layer",
-        default=None,
-        help="Cover the extent of this layer's features (default: the extent of all features in the file)",
-    )
-    add_bbox_arguments(parser, description="Area to cover instead of --area-layer:")
+    add_bbox_arguments(parser, description="Area to cover (default: the extent of all features in the file)")
     parser.add_argument(
         "--zoom",
         type=int,
@@ -91,26 +86,24 @@ def validate_args(args):
         raise ValueError("--zoom must be between 10 and 15.")
     if args.smoothing < 0.0:
         raise ValueError("--smoothing cannot be negative.")
-    validate_optional_bbox(args)
-    if args.area_layer is not None and bbox_from_args(args) is not None:
-        raise ValueError("Supply either --area-layer or a bbox, not both.")
+    validate_bbox(args)
 
 
 def area_bbox(root, args) -> tuple[float, float, float, float]:
-    """The (min_lon, min_lat, max_lon, max_lat) to cover, from the bbox, --area-layer or all features."""
-    bbox = bbox_from_args(args)
+    """The (min_lon, min_lat, max_lon, max_lat) to cover, from --area-layer, the bbox or all features."""
+    bbox = bbox_from_args(args, root)
     if bbox is not None:
         return bbox
 
     layers = extract_layers(root)
-    if args.area_layer is not None:
-        if args.area_layer not in layers:
-            raise ValueError(f"Layer '{args.area_layer}' not found in KML/KMZ, or it has no features.")
-        return tuple(layers[args.area_layer].total_bounds)
     if not layers:
         raise ValueError("No features found in input KML to take the area from; supply a bbox instead.")
     bounds = np.array([gdf.total_bounds for gdf in layers.values()])
-    return bounds[:, 0].min(), bounds[:, 1].min(), bounds[:, 2].max(), bounds[:, 3].max()
+    bbox = bounds[:, 0].min(), bounds[:, 1].min(), bounds[:, 2].max(), bounds[:, 3].max()
+    print("Using the extent of all features: " + ", ".join(
+        f"{name} {value:.5f}" for name, value in zip(("--min-lon", "--min-lat", "--max-lon", "--max-lat"), bbox)
+    ))
+    return bbox
 
 
 def lon_to_tile_x(lon: float, zoom: int) -> float:
@@ -200,8 +193,6 @@ def run(args):
         raise ValueError(f"A layer named '{args.layer_name}' already exists; choose another with --layer-name.")
 
     bbox = area_bbox(root, args)
-    print("Covering area: " + ", ".join(f"{name} {value:.5f}" for name, value in
-                                       zip(("min-lon", "min-lat", "max-lon", "max-lat"), bbox)))
 
     lons, lats, elevations = fetch_elevation_grid(bbox, args.zoom)
     if args.smoothing > 0:

@@ -17,7 +17,7 @@ from shapely.geometry import Point, box
 from shapely.ops import transform as shapely_transform
 from shapely.ops import unary_union
 
-from hns.commands.common import BBOX_ARGS, add_bbox_arguments, add_io_arguments, parse_csv
+from hns.commands.common import add_bbox_arguments, add_io_arguments, bbox_from_args, parse_csv, validate_bbox
 from hns.geo import azimuthal_equidistant_crs, haversine_distance
 from hns.kml import add_folder, add_point_placemark, find_document, load_kml, write_kml
 
@@ -41,7 +41,7 @@ def register(subparsers):
     parser.add_argument(
         "--max-results", type=int, default=20, help="Maximum number of results to fetch (default 20)"
     )
-    add_bbox_arguments(parser, required=True, description="Search area")
+    add_bbox_arguments(parser, description="Search area")
     parser.add_argument(
         "--debug-json",
         type=str,
@@ -424,6 +424,8 @@ def run(args):
     place_types = parse_csv(args.type)
     if not place_types:
         raise ValueError("--type must contain at least one place type.")
+    validate_bbox(args, required=True)
+    root = load_kml(args.input_kml)
 
     if args.debug_json is not None:
         query = partial(query_debug_places, load_debug_places(args.debug_json))
@@ -432,7 +434,7 @@ def run(args):
             query_google_places, read_api_key(), place_types, args.min_reviews is not None, args.debug_plot_dir
         )
 
-    place_filter = PlaceFilter(tuple(getattr(args, name) for name in BBOX_ARGS), args.min_reviews)
+    place_filter = PlaceFilter(bbox_from_args(args, root), args.min_reviews)
     places = search_places(query, place_filter, args)
     if places is None:
         return
@@ -447,7 +449,6 @@ def run(args):
     print(f"Preparing {len(places)} place(s) for output.")
     places = choose_icon(places)
 
-    root = load_kml(args.input_kml)
     layer_name = args.layer_name or ", ".join(t.replace("_", " ").title() for t in place_types)
     folder = add_folder(find_document(root), layer_name)
     for place in places:

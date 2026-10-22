@@ -25,7 +25,7 @@ from hns.commands.common import (
     add_io_arguments,
     bbox_from_args,
     load_layers_excluding,
-    validate_optional_bbox,
+    validate_bbox,
 )
 from hns.geo import choose_projected_crs, iter_lines
 from hns.kml import add_folder, add_line_placemark, add_line_style_map, find_document, load_kml, write_kml
@@ -213,11 +213,11 @@ def process_layer(layer_name: str, gdf: gpd.GeoDataFrame, bbox: tuple | None) ->
 
 
 def run(args):
-    validate_optional_bbox(args)
-    bbox = bbox_from_args(args)
+    validate_bbox(args)
 
     root = load_kml(args.input_kml)
     document = find_document(root)
+    bbox = bbox_from_args(args, root)
     layers = load_layers_excluding(root, args.exclude_layers)
 
     print("\nProcessing layers:")

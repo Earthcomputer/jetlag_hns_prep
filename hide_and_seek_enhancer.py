@@ -26,6 +26,10 @@ Usage:
     python hide_and_seek_enhancer.py voronoi input_points.kml output_voronoi.kml \
         --min-lon -2.0 --min-lat 51.0 --max-lon -1.0 --max-lat 52.0
 
+    # Or clip to the extent of a layer's features (works wherever --min-lon etc. do)
+    python hide_and_seek_enhancer.py voronoi input_points.kml output_voronoi.kml \
+        --area-layer "Game Area"
+
     # List the data fields of a layer that split-layer can split by
     python hide_and_seek_enhancer.py list-fields input.kml "LayerName"
 

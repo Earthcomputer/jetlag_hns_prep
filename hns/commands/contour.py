@@ -12,7 +12,7 @@ from hns.commands.common import (
     add_io_arguments,
     bbox_from_args,
     load_layers_excluding,
-    validate_optional_bbox,
+    validate_bbox,
 )
 from hns.geo import choose_projected_crs, iter_lines
 from hns.kml import add_folder, add_line_placemark, add_line_style_map, find_document, load_kml, write_kml
@@ -68,7 +68,7 @@ def validate_args(args):
         raise ValueError("--min-distance-km must be less than --max-distance-km.")
     if args.secondary_step_km is not None and args.secondary_step_km >= args.step_km:
         raise ValueError("--secondary-step-km must be smaller than --step-km.")
-    validate_optional_bbox(args)
+    validate_bbox(args)
 
 
 def distances_between(start_km: float, end_km: float, step_km: float) -> list[float]:
@@ -150,13 +150,13 @@ def process_contour_layer(
 
 def run(args):
     validate_args(args)
-    bbox = bbox_from_args(args)
     distances_km = contour_distances_km(
         args.step_km, args.min_distance_km, args.max_distance_km, args.secondary_step_km, args.secondary_threshold_km
     )
 
     root = load_kml(args.input_kml)
     document = find_document(root)
+    bbox = bbox_from_args(args, root)
     layers = load_layers_excluding(root, args.exclude_layers)
 
     print("\nProcessing layers:")
