@@ -11,6 +11,9 @@ Usage:
     python hide_and_seek_enhancer.py list input_points.kml
     python hide_and_seek_enhancer.py list input_points.kmz
 
+    # List all layers in a single list in their order in the file, marking hidden ones
+    python hide_and_seek_enhancer.py list input.kmz --ordered
+
     # List the features (names, locations, styles) within a layer
     python hide_and_seek_enhancer.py list-features input.kml "LayerName"
 
@@ -66,6 +69,11 @@ Usage:
     # Delete layers from a KML or KMZ file
     python hide_and_seek_enhancer.py delete-layers input.kml output.kml \
         --layers Layer1,Layer2
+
+    # Delete features from a layer by name, or by their numbers as shown by list-features
+    python hide_and_seek_enhancer.py delete-features input.kml output.kml "LayerName" \
+        --features "Feature1,Feature2"
+    python hide_and_seek_enhancer.py delete-features input.kml output.kml "LayerName" --numbers 2,5
 
     # Rename a layer
     python hide_and_seek_enhancer.py rename-layer input.kml output.kml "OldName" "NewName"
