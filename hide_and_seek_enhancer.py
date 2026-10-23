@@ -120,6 +120,13 @@ Usage:
         --osm-tags "route=train,operator=East Midlands Railway|CrossCountry" --osm-names endpoints \
         --layer-name "Train Routes" --osm-file nottinghamshire-latest.osm.pbf --side-by-side
 
+    # Export hiding zones of radius 0.4 km and custom matching/measuring question presets for the
+    # Taibeled JetLag Hide and Seek Map Generator (https://taibeled.github.io/JetLagHideAndSeek/), to load with its
+    # "Load File", as taibeled.json
+    python hide_and_seek_enhancer.py export-taibeled input.kml \
+        --zones-layer "hiding zones" --radius 0.4 --radius-unit kilometers \
+        --question-layers "1st admin,2nd admin,RIVERS,pois" --boundary-layer "game boandaries"
+
 Dependencies:
     pip install geopandas scipy shapely pyproj fiona lxml requests contourpy pillow osmium
 """
