@@ -6,19 +6,24 @@ The file is the GeoJSON FeatureCollection of the play area, with extra top-level
 - customStations: the hiding zone centres, used instead of the stations it would fetch from OpenStreetMap
 - hidingRadius / hidingRadiusUnits: the hiding zone radius, always in miles. The Taibeled Map Generator ignores
   hidingRadiusUnits, reading the radius in its 'Default Unit' option, which is miles unless changed
-- presets: custom question data, applied to a question from its "Presets" button. Each question layer gives
-  a "custom-measure" preset of all its features, a "custom-points" matching preset of its points, and a
-  "custom-zone" matching preset for each of its areas.
+- presets: custom question data, applied to a question from its "Presets" button:
+  - each measuring layer gives a "custom-measure" preset of all its features
+  - each nearest matching layer of only points gives a "custom-points" preset of them. Otherwise it gives a
+    "custom-zone" preset for each feature, of the region closest to it, from a Voronoi diagram of the layer made
+    as in the voronoi command (lines and polygon outlines are sampled finely), clipped to the play area
+  - each zone matching layer gives a "custom-zone" preset for each of its areas
 Areas are polygons, or closed lines (as an area's border is often drawn).
 """
 
 import json
 
 import geopandas as gpd
+import shapely
 from shapely.geometry import Polygon, box, mapping
 from shapely.ops import unary_union
 
 from hns.commands.common import parse_csv
+from hns.commands.voronoi import DEFAULT_SPACING_FRACTION, feature_regions
 from hns.geo import choose_projected_crs
 from hns.kml import extract_layers, load_kml
 
@@ -44,8 +49,25 @@ def register(subparsers):
              "Generator's default unit",
     )
     parser.add_argument(
-        "--question-layers", default=None,
-        help="Comma-separated list of layers to make matching and measuring question presets from",
+        "--measuring-layers", default=None,
+        help="Comma-separated list of layers to make measuring question presets from, of distance to any feature",
+    )
+    parser.add_argument(
+        "--nearest-layers", default=None,
+        help="Comma-separated list of layers to make nearest matching question presets from: the points of a "
+             "layer of only points, otherwise a zone for each feature of the region closest to it (as in the "
+             "voronoi command)",
+    )
+    parser.add_argument(
+        "--zone-layers", default=None,
+        help="Comma-separated list of layers of areas (polygons or closed lines) to make zone matching question "
+             "presets from, one for each area",
+    )
+    parser.add_argument(
+        "--line-spacing-m", type=float, default=None,
+        help="For nearest matching layers with lines or polygons, the spacing in metres of the samples along "
+             "them that approximate their Voronoi diagram; smaller is more accurate but slower "
+             f"(default: 1/{1 / DEFAULT_SPACING_FRACTION:g} of the play area's width)",
     )
     parser.add_argument(
         "--boundary-layer", default=None,
@@ -111,41 +133,74 @@ def custom_stations(gdf: gpd.GeoDataFrame) -> list[dict]:
     return stations
 
 
-def question_presets(layer_name: str, gdf: gpd.GeoDataFrame) -> list[dict]:
+def preset(name: str, kind: str, geo) -> dict:
+    return {"name": name, "type": kind, "data": {"type": kind, "geo": geo}}
+
+
+def feature_parts(gdf: gpd.GeoDataFrame) -> list[tuple]:
+    return [(name, part) for name, geom in zip(gdf["name"], gdf.geometry) for part in explode(geom)]
+
+
+def measuring_presets(layer_name: str, gdf: gpd.GeoDataFrame) -> list[dict]:
+    """A preset for measuring the distance to any of a layer's features."""
+    features = [geojson_feature(part, name) for name, part in feature_parts(gdf)]
+    return [preset(layer_name, "custom-measure", {"type": "FeatureCollection", "features": features})]
+
+
+def nearest_presets(
+    layer_name: str, gdf: gpd.GeoDataFrame, play_polygons: list[Polygon], spacing_m: float | None
+) -> list[dict]:
     """
-    The presets made from one layer: measuring distance to any of its features, matching the nearest of its
-    points, and matching each of its areas as a zone.
+    Presets for matching the nearest of a layer's features: its points if it has only points, otherwise a zone for
+    each feature of the part of the play area closest to it.
     """
-    parts = [(name, part) for name, geom in zip(gdf["name"], gdf.geometry) for part in explode(geom)]
-    points = [geojson_feature(part, name) for name, part in parts if part.geom_type == "Point"]
-    presets = [{
-        "name": layer_name,
-        "type": "custom-measure",
-        "data": {
-            "type": "custom-measure",
-            "geo": {"type": "FeatureCollection", "features": [geojson_feature(part, name) for name, part in parts]},
-        },
-    }]
-    if points:
-        presets.append({
-            "name": layer_name,
-            "type": "custom-points",
-            "data": {"type": "custom-points", "geo": points},
-        })
+    parts = feature_parts(gdf)
+    if all(part.geom_type == "Point" for _, part in parts):
+        return [preset(layer_name, "custom-points", [geojson_feature(part, name) for name, part in parts])]
+
+    gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty]
+    if len(gdf) < 2:
+        raise ValueError(f"Nearest matching layer '{layer_name}' needs at least 2 features.")
+    projected_crs = choose_projected_crs(gdf)
+    geoms_proj = list(gdf.to_crs(projected_crs).geometry)
+    clip_poly = gpd.GeoSeries(play_polygons, crs="EPSG:4326").to_crs(projected_crs).union_all()
+    if spacing_m is None:
+        minx, miny, maxx, maxy = clip_poly.bounds
+        spacing_m = max(maxx - minx, maxy - miny) * DEFAULT_SPACING_FRACTION
+
+    regions = feature_regions(geoms_proj, clip_poly, spacing_m)
+    named = [(name, region) for name, region in zip(gdf["name"], regions) if region is not None]
+    if not named:
+        raise ValueError(f"Nearest matching layer '{layer_name}' has no regions within the play area.")
+    # The regions' borders are made of many short segments, so simplify them within the sample spacing,
+    # which they are only accurate to, to keep the file small
+    simplified = shapely.simplify([region for _, region in named], spacing_m / 2, preserve_topology=True)
+    regions_wgs84 = gpd.GeoSeries(simplified, crs=projected_crs).to_crs("EPSG:4326")
+    print(f"  '{layer_name}': regions closest to {len(named)} of its {len(gdf)} features, "
+          f"sampled every {spacing_m:.3g} m")
+    return [
+        preset(f"{layer_name}: {name}", "custom-zone", geojson_feature(region, name))
+        for (name, _), region in zip(named, regions_wgs84)
+    ]
+
+
+def zone_presets(layer_name: str, gdf: gpd.GeoDataFrame) -> list[dict]:
+    """A preset for matching each of a layer's areas as a zone."""
+    presets = []
     for name, geom in zip(gdf["name"], gdf.geometry):
         polygons = list(areas(geom))
         if polygons:
-            presets.append({
-                "name": f"{layer_name}: {name}",
-                "type": "custom-zone",
-                "data": {"type": "custom-zone", "geo": geojson_feature(unary_union(polygons), name)},
-            })
+            presets.append(preset(f"{layer_name}: {name}", "custom-zone", geojson_feature(unary_union(polygons), name)))
+        else:
+            print(f"  Skipping '{name}' in '{layer_name}': it is not a polygon or closed line")
+    if not presets:
+        raise ValueError(f"Zone matching layer '{layer_name}' has no polygons or closed lines.")
     return presets
 
 
-def play_area(layers: dict[str, gpd.GeoDataFrame], args, zones: gpd.GeoDataFrame, radius_m: float) -> list[dict]:
+def play_area(layers: dict[str, gpd.GeoDataFrame], args, zones: gpd.GeoDataFrame, radius_m: float) -> list[Polygon]:
     """
-    Polygon features for the play area. The Taibeled Map Generator only handles single Polygons here, and joins
+    Polygons (in WGS84) for the play area. The Taibeled Map Generator only handles single Polygons here, and joins
     all their rings into one Overpass query area, so multipolygons are split and holes dropped.
     """
     if args.boundary_layer is not None:
@@ -166,12 +221,14 @@ def play_area(layers: dict[str, gpd.GeoDataFrame], args, zones: gpd.GeoDataFrame
         extent = box(*zones.to_crs(crs).buffer(radius_m).total_bounds)
         polygons = list(gpd.GeoSeries([extent], crs=crs).to_crs("EPSG:4326"))
         print("Using a rectangle around the hiding zones as the play area")
-    return [geojson_feature(Polygon(polygon.exterior)) for polygon in polygons]
+    return [Polygon(polygon.exterior) for polygon in polygons]
 
 
 def run(args):
     if args.radius <= 0:
         raise ValueError("--radius must be positive.")
+    if args.line_spacing_m is not None and args.line_spacing_m <= 0:
+        raise ValueError("--line-spacing-m must be positive.")
 
     print(f"Reading KML from: {args.input_kml}")
     layers = extract_layers(load_kml(args.input_kml))
@@ -181,22 +238,37 @@ def run(args):
     print(f"Exported {len(stations)} hiding zone(s) from '{args.zones_layer}', "
           f"with radius {args.radius:g} {args.radius_unit}")
 
+    radius_m = args.radius * UNIT_METRES[args.radius_unit]
+    play_polygons = play_area(layers, args, zones, radius_m)
+
     presets = []
-    for layer_name in parse_csv(args.question_layers):
-        layer_presets = question_presets(layer_name, get_layer(layers, layer_name, "Question layer"))
-        counts = {kind: sum(p["type"] == kind for p in layer_presets)
-                  for kind in ("custom-measure", "custom-points", "custom-zone")}
-        print(f"Made presets from '{layer_name}': " + ", ".join(f"{n} {kind}" for kind, n in counts.items() if n))
-        presets.extend(layer_presets)
+    question_layers = (
+        ("Measuring", args.measuring_layers, measuring_presets),
+        ("Nearest matching", args.nearest_layers,
+         lambda name, gdf: nearest_presets(name, gdf, play_polygons, args.line_spacing_m)),
+        ("Zone matching", args.zone_layers, zone_presets),
+    )
+    # Check every layer exists before making any presets, some of which are slow
+    question_layers = [
+        (description, [(name, get_layer(layers, name, f"{description} layer")) for name in parse_csv(names)], make)
+        for description, names, make in question_layers
+    ]
+    for description, named_layers, make_presets in question_layers:
+        for layer_name, gdf in named_layers:
+            layer_presets = make_presets(layer_name, gdf)
+            kinds = sorted({p["type"] for p in layer_presets})
+            print(f"Made {description.lower()} presets from '{layer_name}': " + ", ".join(
+                f"{sum(p['type'] == kind for p in layer_presets)} {kind}" for kind in kinds
+            ))
+            presets.extend(layer_presets)
     # Ids only need to be unique; numbering them keeps them the same between exports
     for index, preset in enumerate(presets, 1):
         preset["id"] = f"hns-{index}"
 
-    radius_m = args.radius * UNIT_METRES[args.radius_unit]
     radius_miles = round(radius_m / UNIT_METRES["miles"], 6)
     output = {
         "type": "FeatureCollection",
-        "features": play_area(layers, args, zones, radius_m),
+        "features": [geojson_feature(polygon) for polygon in play_polygons],
         "questions": [],
         "disabledStations": [],
         "hidingRadius": radius_miles,

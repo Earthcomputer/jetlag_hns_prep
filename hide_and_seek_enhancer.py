@@ -131,10 +131,12 @@ Usage:
 
     # Export hiding zones of radius 0.4 km and custom matching/measuring question presets for the
     # Taibeled JetLag Hide and Seek Map Generator (https://taibeled.github.io/JetLagHideAndSeek/), to load with its
-    # "Load File", as taibeled.json
+    # "Load File", as taibeled.json. Nearest matching layers of points use their points, and other layers
+    # (here RIVERS) a zone for each feature of the region closest to it, as in the voronoi command
     python hide_and_seek_enhancer.py export-taibeled input.kml \
         --zones-layer "hiding zones" --radius 0.4 --radius-unit kilometers \
-        --question-layers "1st admin,2nd admin,RIVERS,pois" --boundary-layer "game boandaries"
+        --measuring-layers "RIVERS,pois" --nearest-layers "RIVERS,pois" --zone-layers "1st admin,2nd admin" \
+        --boundary-layer "game boandaries"
 
 Dependencies:
     pip install geopandas scipy shapely pyproj fiona lxml requests contourpy pillow osmium
