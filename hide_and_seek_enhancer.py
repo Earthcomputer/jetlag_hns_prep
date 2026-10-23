@@ -26,6 +26,11 @@ Usage:
     python hide_and_seek_enhancer.py voronoi input_points.kml output_voronoi.kml \
         --include-layers Layer1,Layer2
 
+    # Layers named with --include-layers can also have lines and polygons: the diagram then divides the
+    # area into the regions closest to each feature (e.g. each river), sampling lines every 10 m
+    python hide_and_seek_enhancer.py voronoi input.kml output_voronoi.kml \
+        --include-layers Rivers --line-spacing-m 10
+
     # Generate with custom clip extent
     python hide_and_seek_enhancer.py voronoi input_points.kml output_voronoi.kml \
         --min-lon -2.0 --min-lat 51.0 --max-lon -1.0 --max-lat 52.0
