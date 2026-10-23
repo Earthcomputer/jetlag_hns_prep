@@ -8,10 +8,10 @@ from shapely.ops import unary_union
 
 from hns.commands.common import (
     add_bbox_arguments,
-    add_exclude_layers_argument,
     add_io_arguments,
+    add_layer_filter_arguments,
     bbox_from_args,
-    load_layers_excluding,
+    load_layers,
     validate_bbox,
 )
 from hns.geo import choose_projected_crs, iter_lines
@@ -40,7 +40,7 @@ def register(subparsers):
     parser.add_argument(
         "--min-distance-km", type=float, default=0.0, help="Minimum contour distance in kilometers (default 0)"
     )
-    add_exclude_layers_argument(parser)
+    add_layer_filter_arguments(parser)
     add_bbox_arguments(parser)
     parser.add_argument(
         "--secondary-step-km",
@@ -157,7 +157,7 @@ def run(args):
     root = load_kml(args.input_kml)
     document = find_document(root)
     bbox = bbox_from_args(args, root)
-    layers = load_layers_excluding(root, args.exclude_layers)
+    layers = load_layers(root, args)
 
     print("\nProcessing layers:")
     contours_by_layer = {}

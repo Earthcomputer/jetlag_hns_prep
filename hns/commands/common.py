@@ -31,6 +31,21 @@ def add_exclude_layers_argument(parser: argparse.ArgumentParser, purpose: str = 
     )
 
 
+def add_layer_filter_arguments(parser: argparse.ArgumentParser):
+    """Add --include-layers and --exclude-layers, alternative ways to choose layers. Load them with load_layers."""
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--include-layers",
+        default=None,
+        help="Comma-separated list of the only layer names to use, e.g. 'Layer1,Layer2' (default: all layers)",
+    )
+    group.add_argument(
+        "--exclude-layers",
+        default=None,
+        help="Comma-separated list of layer names to exclude, e.g. 'Layer1,Layer2'",
+    )
+
+
 def add_bbox_arguments(parser: argparse.ArgumentParser, description: str = "Clip extent"):
     """Add --area-layer and --min-lon etc., two alternative ways to give an area. Check them with validate_bbox."""
     parser.add_argument(
@@ -79,19 +94,30 @@ def bbox_from_args(args: argparse.Namespace, root: etree._Element) -> tuple[floa
     return None if None in bbox else bbox
 
 
-def load_layers_excluding(root: etree._Element, exclude_layers: str | None) -> dict[str, gpd.GeoDataFrame]:
-    """Extract all layers with geometries, minus those named in the --exclude-layers argument."""
+def load_layers(root: etree._Element, args: argparse.Namespace) -> dict[str, gpd.GeoDataFrame]:
+    """
+    Extract the layers with geometries: only those named in --include-layers if given,
+    otherwise all minus those named in --exclude-layers.
+    """
     print("Reading KML layers...")
     layers = extract_layers(root)
     if not layers:
         raise ValueError("No layers with features found in input KML.")
     print(f"Found {len(layers)} layer(s): {', '.join(sorted(layers))}")
 
-    excluded = set(parse_csv(exclude_layers))
+    included = parse_csv(args.include_layers)
+    if included:
+        missing = [name for name in included if name not in layers]
+        if missing:
+            raise ValueError(f"Layer(s) not found in KML/KMZ, or with no features: {', '.join(missing)}")
+        print(f"Using only layers: {', '.join(sorted(included))}")
+        layers = {name: gdf for name, gdf in layers.items() if name in included}
+
+    excluded = set(parse_csv(args.exclude_layers))
     if excluded:
         print(f"Excluding layers: {', '.join(sorted(excluded))}")
         layers = {name: gdf for name, gdf in layers.items() if name not in excluded}
     if not layers:
-        raise ValueError("No layers remain after applying exclusion filter.")
+        raise ValueError("No layers remain after applying the layer filter.")
 
     return layers
